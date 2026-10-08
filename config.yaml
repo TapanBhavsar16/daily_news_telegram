@@ -1,0 +1,43 @@
+llm:
+  model: "nvidia_nim/meta/llama-3.1-70b-instruct"
+  small_model: "nvidia_nim/meta/llama-3.1-8b-instruct"
+  fallbacks: []
+agent:
+  tool_mode: auto
+  max_steps: 20
+  max_fetches: 8
+  max_search_calls: 6
+  max_tokens_total: 120000
+  wall_clock_seconds: 180
+  stall_steps: 3
+  trim_keep_last: 6
+  scratchpad:
+    max_note_chars: 4000
+    max_total_chars: 30000
+    render_limit_chars: 12000
+crawl:
+  max_depth: 2
+  max_pages: 8
+  max_pages_per_domain: 3
+  blocked_domains: []
+  allowed_domains: []
+news:
+  items_per_topic: 3
+  candidates_to_research: 5
+  max_discovery_rounds: 3
+  max_backfill_rounds: 1
+  max_parallel_agents: 3
+  min_items_to_post: 1
+tinyfish:
+  api_key_env: "TINYFISH_API_KEY"
+telegram:
+  bot_token_env: "TELEGRAM_BOT_TOKEN"
+  chat_id_env: "TELEGRAM_CHAT_ID"
+  parse_mode: "HTML"
+  disable_web_page_preview: true
+database:
+  path: "data/newsagent.db"
+  retention_days: 30
+logging:
+  level: "INFO"
+  format: "json"
