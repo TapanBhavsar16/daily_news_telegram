@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import uuid
 from typing import Any
 
@@ -9,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 from newsagent.config import Config, load_config
 from newsagent.graph.nodes import (
     backfill_node,
+    collect_node,
     compose_node,
     dedupe_story_node,
     discover_node,
@@ -104,7 +106,10 @@ def build_graph(config: Config | None = None, checkpointer: SqliteSaver | None =
 
     if checkpointer is None:
         db_path = config.database.path
-        checkpointer = SqliteSaver.from_conn_string(db_path)
+        import os
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        checkpointer = SqliteSaver(conn)
 
     return graph.compile(checkpointer=checkpointer)
 

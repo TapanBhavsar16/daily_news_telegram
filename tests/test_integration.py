@@ -305,5 +305,122 @@ async def test_tool_schemas(config):
     assert "confidence" in finish_schema["function"]["parameters"]["properties"]
 
 
+@pytest.mark.asyncio
+async def test_idempotent_send_crash_recovery():
+    """Test that pending posts can be recovered after a crash."""
+    from newsagent.config import Config
+    from newsagent.memory.store import create_memory_store
+    
+    config = Config()
+    memory = create_memory_store(config)
+    
+    # Use unique topic to avoid conflicts with other tests
+    topic = "Test Topic Crash Recovery"
+    
+    # Simulate creating a pending post (before send)
+    pending_id = memory.create_pending_post(
+        topic=topic,
+        message="<b>Test Message</b>",
+        items=[{"candidate": {"title": "Test"}, "answer": "Test answer", "sources": ["https://example.com"]}],
+    )
+    
+    # Verify pending post exists and is unsent
+    unsent = memory.get_unsent_pending(topic)
+    assert len(unsent) == 1
+    assert unsent[0].id == pending_id
+    assert unsent[0].sent_at is None
+    
+    # Simulate successful send - mark as sent
+    result = memory.mark_pending_sent(pending_id, telegram_message_id=12345)
+    assert result is True
+    
+    # Verify no unsent posts remain
+    unsent = memory.get_unsent_pending(topic)
+    assert len(unsent) == 0
+
+
+@pytest.mark.asyncio
+async def test_duplicate_pending_post_not_created_on_resume():
+    """Test that resuming doesn't create duplicate pending posts."""
+    from newsagent.config import Config
+    from newsagent.memory.store import create_memory_store
+    
+    config = Config()
+    memory = create_memory_store(config)
+    
+    # Use unique topic to avoid conflicts with other tests
+    topic = "Test Topic Resume"
+    
+    # Create a pending post and mark it as sent (simulating completed send)
+    pending_id = memory.create_pending_post(
+        topic=topic,
+        message="<b>Test Message</b>",
+        items=[{"candidate": {"title": "Test"}, "answer": "Test answer", "sources": ["https://example.com"]}],
+    )
+    memory.mark_pending_sent(pending_id, telegram_message_id=12345)
+    
+    # On resume, check for unsent posts - should be empty
+    unsent = memory.get_unsent_pending(topic)
+    assert len(unsent) == 0
+    
+    # The posted items should not exist yet (add_posted_item wasn't called)
+    recent = memory.get_recent_posts(topic, days=1)
+    assert len(recent) == 0
+
+
+@pytest.mark.asyncio
+async def test_full_posted_item_persistence():
+    """Test that posted items are properly saved after successful send."""
+    from newsagent.config import Config
+    from newsagent.memory.store import create_memory_store
+    import uuid
+    
+    config = Config()
+    memory = create_memory_store(config)
+    
+    # Use unique topic and URL to avoid conflicts with other tests
+    unique_id = str(uuid.uuid4())[:8]
+    topic = f"Test Topic Full Persistence {unique_id}"
+    url = f"https://example.com/persistence/{unique_id}"
+    
+    # Simulate the full flow: pending -> sent -> posted items saved
+    pending_id = memory.create_pending_post(
+        topic=topic,
+        message="<b>Test Message</b>",
+        items=[{"candidate": {"title": "Test Story", "url": url}, "answer": "Test answer", "sources": [url]}],
+    )
+    
+    # Mark as sent
+    memory.mark_pending_sent(pending_id, telegram_message_id=12345)
+    
+    # Add posted items (as done in post_telegram_node after successful send)
+    item_id = memory.add_posted_item(
+        topic=topic,
+        title="Test Story",
+        url=url,
+        summary="Test answer",
+        key_facts=["Fact 1", "Fact 2"],
+        entities=["Entity 1"],
+        run_id="test_run_123",
+    )
+    
+    # Verify posted item exists
+    recent = memory.get_recent_posts(topic, days=1)
+    assert len(recent) == 1
+    assert recent[0].title == "Test Story"
+    assert recent[0].url == url
+    assert "Fact 1" in recent[0].key_facts
+    
+    # Verify duplicate detection works
+    is_dup, reason = memory.check_duplicate(
+        url=url,
+        title="Test Story",
+        summary="Test answer",
+        key_facts=["Fact 1", "Fact 2"],
+    )
+    assert is_dup is True
+    assert "URL already posted" in reason or "Title already posted" in reason or "Content already posted" in reason
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

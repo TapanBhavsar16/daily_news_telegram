@@ -465,45 +465,45 @@ async def compose_node(state: TopicState) -> dict[str, Any]:
     if not selected:
         return {"message": "", "sent": False}
 
-    today_str = date.today().strftime("%d %b %Y")
-    lines = [f"<b>📰 {topic}: top {len(selected)} ({today_str})</b>", ""]
+    from newsagent.tools.telegram import format_story_message
 
-    for i, r in enumerate(selected, 1):
+    today_str = date.today().strftime("%d %b %Y")
+    
+    stories = []
+    for r in selected:
         candidate = r.get("candidate", {})
         answer = r.get("answer", "")
         confidence = r.get("confidence", 0.0)
         sources = r.get("sources", [])
+        notes = r.get("notes", {})
 
         title = candidate.get("title", "Untitled")
-        url = candidate.get("url", "")
-
+        
         sentences = [s.strip() for s in answer.split(". ") if s.strip()]
         summary = ". ".join(sentences[:3]) if sentences else answer[:300]
-
-        lines.append(f"{i}. <b>{title}</b>")
-        lines.append(summary)
-
-        key_facts = [v for k, v in r.get("notes", {}).items() if k.startswith("facts_")]
-        for fact in key_facts[:3]:
-            lines.append(f"• {fact[:200]}")
-
-        lines.append(f"<i>Why it matters:</i> {sentences[-1] if len(sentences) > 3 else 'Significant development in this area.'}")
-
-        source_links = []
+        
+        key_facts = [v for k, v in notes.items() if k.startswith("facts_")]
+        
+        why_matters = sentences[-1] if len(sentences) > 3 else "Significant development in this area."
+        
+        source_list = []
         for src in sources[:3]:
-            source_links.append(f'<a href="{src}">Source</a>')
-        if source_links:
-            lines.append(" · ".join(source_links) + f" · {date.today().strftime('%d %b')}")
+            source_list.append({"url": src, "label": "Source"})
+        
+        story = {
+            "headline": title,
+            "summary": summary,
+            "key_details": key_facts[:3],
+            "why_it_matters": why_matters,
+            "sources": source_list,
+            "date": today_str,
+        }
+        stories.append(story)
 
-        if confidence < 0.5:
-            lines.append("<i>Note: Low confidence (single/limited sources)</i>")
+    message = format_story_message(topic, today_str, stories)
 
-        lines.append("")
-
-    message = "\n".join(lines).strip()
-
-    if len(message) > 4096:
-        message = message[:4090] + "..."
+    if confidence < 0.5:
+        message += "\n\n<i>Note: Low confidence (single/limited sources)</i>"
 
     logger.info("Composed message", length=len(message), items=len(selected))
     return {"message": message, "sent": False}
