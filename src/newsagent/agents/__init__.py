@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from newsagent.agents.crawler import Crawler, create_crawler, Frontier, CrawlResult
 from newsagent.agents.scratchpad import Scratchpad, ScratchpadNote, create_scratchpad
 from newsagent.agents.research_agent import ResearchAgent, ResearchResult, research
 from newsagent.agents.context import trim_old_tool_results, render_state, force_finish
 
 __all__ = [
+    "Crawler",
+    "create_crawler",
+    "Frontier",
+    "CrawlResult",
     "Scratchpad",
     "ScratchpadNote",
     "create_scratchpad",
