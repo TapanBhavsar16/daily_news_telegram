@@ -345,19 +345,26 @@ class ToolRegistry:
         try:
             if action == "write":
                 scratchpad.run("write", key=key, content=content, source_url=source_url)
-                return json.dumps({"status": "written", "key": key})
+                next_hint = ""
+                if key == "plan":
+                    next_hint = "NEXT STEP: Write a checklist to scratchpad (key: 'checklist') with sub-questions to answer."
+                elif key == "checklist":
+                    next_hint = "NEXT STEP: Search for the first checklist item using the search tool."
+                elif key.startswith("facts_"):
+                    next_hint = "NEXT STEP: Continue with next checklist item or call finish if done."
+                return json.dumps({"status": "written", "key": key, "next_step": next_hint})
             elif action == "append":
                 scratchpad.run("append", key=key, content=content, source_url=source_url)
-                return json.dumps({"status": "appended", "key": key})
+                return json.dumps({"status": "appended", "key": key, "next_step": "Continue with next step."})
             elif action == "read":
                 value = scratchpad.run("read", key=key)
                 return json.dumps({"key": key, "content": value})
             elif action == "list":
                 keys = scratchpad.run("list")
-                return json.dumps({"keys": keys})
+                return json.dumps({"keys": keys, "next_step": "Continue with next step."})
             elif action == "delete":
                 scratchpad.run("delete", key=key)
-                return json.dumps({"status": "deleted", "key": key})
+                return json.dumps({"status": "deleted", "key": key, "next_step": "Continue with next step."})
             else:
                 return json.dumps({"error": f"Unknown scratchpad action: {action}"})
         except Exception as e:

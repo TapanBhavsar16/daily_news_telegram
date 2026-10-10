@@ -1,9 +1,9 @@
 llm:
-  model: "nvidia_nim/meta/llama-3.1-70b-instruct"
-  small_model: "nvidia_nim/meta/llama-3.1-8b-instruct"
+  model: "nvidia_nim/mistralai/mistral-7b-instruct-v0.3"
+  small_model: "nvidia_nim/mistralai/mistral-7b-instruct-v0.3"
   fallbacks: []
 agent:
-  tool_mode: auto
+  tool_mode: json
   max_steps: 20
   max_fetches: 8
   max_search_calls: 6

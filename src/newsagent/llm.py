@@ -202,12 +202,34 @@ Only call one tool per response. No extra text outside the JSON.
         raise RuntimeError(f"All models failed. Last error: {last_error}")
 
     def _parse_json_response(self, response: Any) -> ChatResponse:
+        import re
         message = response.choices[0].message
         content = message.content or ""
 
-        try:
-            parsed = json.loads(content.strip())
-        except json.JSONDecodeError:
+        json_text = content.strip()
+
+        def try_parse(text):
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                json_match = re.search(r"\{.*\}", text, re.DOTALL)
+                if json_match:
+                    try:
+                        return json.loads(json_match.group())
+                    except json.JSONDecodeError:
+                        pass
+                for start in range(len(text)):
+                    for end in range(start + 1, len(text) + 1):
+                        if text[start] == '{' and text[end-1] == '}':
+                            try:
+                                return json.loads(text[start:end])
+                            except json.JSONDecodeError:
+                                pass
+            return None
+
+        parsed = try_parse(json_text)
+
+        if parsed is None:
             return ChatResponse(
                 content=content,
                 tool_calls=[],

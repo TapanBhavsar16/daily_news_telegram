@@ -222,7 +222,7 @@ def test_phase2_config_loads_without_exposing_or_requiring_credentials():
     """The checked-in YAML drives behavior; secrets remain external config."""
 
     config = load_config()
-    assert config.agent.tool_mode == "auto"
+    assert config.agent.tool_mode == "json"
     assert config.news.max_discovery_rounds == 3
     assert config.crawl.max_pages_per_domain == 3
     assert config.tinyfish.api_key_env == "TINYFISH_API_KEY"

@@ -5,7 +5,7 @@ import sys
 from typing import Any
 
 import structlog
-from newsagent.config import Config, LoggingConfig
+from newsagent.config import LoggingConfig
 
 
 def setup_logging(config: LoggingConfig) -> None:
@@ -39,6 +39,11 @@ def setup_logging(config: LoggingConfig) -> None:
         stream=sys.stdout,
         level=log_level,
     )
+
+
+def configure_logging(level: str, format: str) -> None:
+    config = LoggingConfig(level=level, format=format)
+    setup_logging(config)
 
 
 def get_logger(name: str) -> structlog.BoundLogger:
