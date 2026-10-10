@@ -71,3 +71,10 @@ module_testing/
 # Build artifacts
 *.whl
 *.tar.gz
+
+# Graphify output
+graphify-out/
+*.graphify.json
+.graphify_*
+graph.html
+GRAPH_REPORT.md
