@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from rich.console import Console
@@ -12,6 +12,7 @@ from rich.table import Table
 
 from newsagent.config import Config, load_config
 from newsagent.agents import research as run_research, ResearchResult
+from newsagent.graph import run_news_pipeline
 from newsagent.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -55,18 +56,38 @@ def run(
     topic: str = typer.Argument(..., help="News topic to research"),
     config_path: Optional[str] = typer.Option(None, "--config", "-c", help="Path to config.yaml"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    freshness_days: int = typer.Option(7, "--freshness", "-f", help="Days back to search for news"),
+    run_id: Optional[str] = typer.Option(None, "--run-id", help="Optional run ID for resuming"),
 ):
     """
-    Run the full news pipeline for a topic (not yet implemented - Phase 7+).
+    Run the full news pipeline for a topic.
 
-    This will be implemented in Phase 7 when the outer LangGraph is built.
+    Example:
+        newsagent run "AI chips" --freshness 3
     """
-    console.print("[yellow]News pipeline not yet implemented. Use 'research' command for now.[/yellow]")
-    raise typer.Exit(1)
+    config = load_config(config_path)
+    configure_logging(config.logging.level, config.logging.format)
+
+    if verbose:
+        console.print(f"[dim]Config:[/dim] {config.llm.model}, tool_mode={config.agent.tool_mode}")
+        console.print(f"[dim]Topic:[/dim] {topic}")
+        console.print(f"[dim]Freshness:[/dim] {freshness_days} days")
+
+    console.print(Panel(f"[bold]News Pipeline:[/bold] {topic}", expand=False))
+
+    result = asyncio.run(_run_news_pipeline(topic, config, freshness_days, run_id))
+
+    _display_pipeline_result(result)
 
 
 async def _run_research(question: str, config: Config) -> ResearchResult:
     return await run_research(question, config=config)
+
+
+async def _run_news_pipeline(
+    topic: str, config: Config, freshness_days: int, run_id: Optional[str]
+) -> dict[str, Any]:
+    return await run_news_pipeline(topic, config, freshness_days, run_id)
 
 
 def _display_result(result: ResearchResult) -> None:
@@ -104,6 +125,43 @@ def _display_result(result: ResearchResult) -> None:
                 console.print(f"  [dim]{key}:[/dim] {content[:200]}..." if len(content) > 200 else f"  [dim]{key}:[/dim] {content}")
             else:
                 console.print(f"  [bold]{key}:[/bold] {content[:300]}..." if len(content) > 300 else f"  [bold]{key}:[/bold] {content}")
+
+
+def _display_pipeline_result(result: dict[str, Any]) -> None:
+    console.print("\n[bold green]✓ News Pipeline Complete[/bold green]\n")
+
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Key", style="bold cyan")
+    table.add_column("Value")
+
+    table.add_row("Topic", result.get("topic", ""))
+    table.add_row("Run ID", result.get("run_id", ""))
+    table.add_row("Rounds", str(result.get("round", 0)))
+    table.add_row("Candidates Found", str(len(result.get("candidates", []))))
+    table.add_row("Stories Researched", str(len(result.get("research", []))))
+    table.add_row("Stories Selected", str(len(result.get("selected", []))))
+    table.add_row("Message Sent", "Yes" if result.get("sent") else "No")
+    table.add_row("Errors", str(len(result.get("errors", []))))
+
+    console.print(table)
+
+    if result.get("errors"):
+        console.print("\n[bold red]Errors:[/bold red]")
+        for err in result["errors"]:
+            console.print(f"  • {err}")
+
+    if result.get("selected"):
+        console.print("\n[bold]Selected Stories:[/bold]")
+        for i, r in enumerate(result["selected"], 1):
+            candidate = r.get("candidate", {})
+            title = candidate.get("title", "Untitled")
+            confidence = r.get("confidence", 0.0)
+            console.print(f"  {i}. {title} (confidence: {confidence:.0%})")
+
+    if result.get("message"):
+        console.print("\n[bold]Telegram Message Preview:[/bold]")
+        preview = result["message"][:500] + "..." if len(result["message"]) > 500 else result["message"]
+        console.print(Markdown(preview))
 
 
 def main():

@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+import uuid
+from typing import Any
+
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
+
+from newsagent.config import Config, load_config
+from newsagent.graph.nodes import (
+    backfill_node,
+    compose_node,
+    dedupe_story_node,
+    discover_node,
+    fan_out_node,
+    filter_seen_node,
+    plan_queries_node,
+    post_telegram_node,
+    rank_select_node,
+    research_agent_node,
+    save_memory_node,
+    shortlist_node,
+    should_backfill,
+    should_widen_queries,
+    verify_recency_node,
+    widen_queries_node,
+)
+from newsagent.graph.state import TopicState
+from newsagent.memory.store import MemoryStore
+
+
+def create_initial_state(
+    topic: str,
+    config: Config,
+    freshness_days: int | None = None,
+    run_id: str | None = None,
+) -> TopicState:
+    news_cfg = config.news
+    return TopicState(
+        topic=topic,
+        freshness_days=freshness_days or 7,
+        round=0,
+        queries=[],
+        candidates=[],
+        research=[],
+        selected=[],
+        message="",
+        sent=False,
+        lead_notes={},
+        errors=[],
+        run_id=run_id or str(uuid.uuid4())[:12],
+        max_discovery_rounds=news_cfg.max_discovery_rounds,
+        candidates_to_research=news_cfg.candidates_to_research,
+        items_per_topic=news_cfg.items_per_topic,
+        max_parallel_agents=news_cfg.max_parallel_agents,
+        max_backfill_rounds=news_cfg.max_backfill_rounds,
+        min_items_to_post=news_cfg.min_items_to_post,
+    )
+
+
+def build_graph(config: Config | None = None, checkpointer: SqliteSaver | None = None):
+    config = config or load_config()
+
+    graph = StateGraph(TopicState)
+
+    graph.add_node("plan_queries", plan_queries_node)
+    graph.add_node("discover", discover_node)
+    graph.add_node("filter_seen", filter_seen_node)
+    graph.add_node("shortlist", shortlist_node)
+    graph.add_node("widen_queries", widen_queries_node)
+    graph.add_node("fan_out", fan_out_node)
+    graph.add_node("research_agent", research_agent_node)
+    graph.add_node("collect", collect_node)
+    graph.add_node("verify_recency", verify_recency_node)
+    graph.add_node("rank_select", rank_select_node)
+    graph.add_node("dedupe_story", dedupe_story_node)
+    graph.add_node("backfill", backfill_node)
+    graph.add_node("compose", compose_node)
+    graph.add_node("post_telegram", post_telegram_node)
+    graph.add_node("save_memory", save_memory_node)
+
+    graph.add_edge(START, "plan_queries")
+    graph.add_edge("plan_queries", "discover")
+    graph.add_edge("discover", "filter_seen")
+    graph.add_edge("filter_seen", "shortlist")
+    graph.add_conditional_edges("shortlist", should_widen_queries, {
+        "widen_queries": "widen_queries",
+        "shortlist": "fan_out",
+    })
+    graph.add_edge("widen_queries", "discover")
+    graph.add_edge("fan_out", "research_agent")
+    graph.add_edge("research_agent", "collect")
+    graph.add_edge("collect", "verify_recency")
+    graph.add_edge("verify_recency", "rank_select")
+    graph.add_edge("rank_select", "dedupe_story")
+    graph.add_conditional_edges("dedupe_story", should_backfill, {
+        "backfill": "backfill",
+        "compose": "compose",
+    })
+    graph.add_edge("backfill", "fan_out")
+    graph.add_edge("compose", "post_telegram")
+    graph.add_edge("post_telegram", "save_memory")
+    graph.add_edge("save_memory", END)
+
+    if checkpointer is None:
+        db_path = config.database.path
+        checkpointer = SqliteSaver.from_conn_string(db_path)
+
+    return graph.compile(checkpointer=checkpointer)
+
+
+async def run_news_pipeline(
+    topic: str,
+    config: Config | None = None,
+    freshness_days: int | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    config = config or load_config()
+    initial_state = create_initial_state(topic, config, freshness_days, run_id)
+
+    graph = build_graph(config)
+
+    memory = MemoryStore(config)
+    memory.start_run(initial_state["run_id"], topic)
+
+    try:
+        result = await graph.ainvoke(initial_state, config={"recursion_limit": 100})
+        return result
+    except Exception as e:
+        memory.finish_run(initial_state["run_id"], "failed", error=str(e))
+        raise
+
+
+__all__ = ["build_graph", "create_initial_state", "run_news_pipeline"]
