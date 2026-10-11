@@ -29,7 +29,9 @@ from newsagent.graph.nodes import (
 )
 from newsagent.graph.state import TopicState
 from newsagent.memory.store import MemoryStore
+from newsagent.logging import get_logger
 
+logger = get_logger(__name__)
 
 def create_initial_state(
     topic: str,
@@ -114,6 +116,31 @@ def build_graph(config: Config | None = None, checkpointer: SqliteSaver | None =
     return graph.compile(checkpointer=checkpointer)
 
 
+def _aggregate_costs(result: dict[str, Any]) -> dict[str, Any]:
+    """Aggregate costs from all research agents in the pipeline result."""
+    total = {
+        "total_tokens": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "llm_calls": 0,
+        "steps_used": 0,
+        "fetches_used": 0,
+        "searches_used": 0,
+        "wall_time_seconds": 0.0,
+        "agents_count": 0,
+    }
+    
+    for r in result.get("research", []):
+        total["total_tokens"] += r.get("tokens_used", 0)
+        total["steps_used"] += r.get("steps_used", 0)
+        total["fetches_used"] += r.get("fetches_used", 0)
+        total["searches_used"] += r.get("searches_used", 0)
+        total["wall_time_seconds"] += r.get("wall_time_seconds", 0)
+        total["agents_count"] += 1
+    
+    return total
+
+
 async def run_news_pipeline(
     topic: str,
     config: Config | None = None,
@@ -130,6 +157,18 @@ async def run_news_pipeline(
 
     try:
         result = await graph.ainvoke(initial_state, config={"recursion_limit": 100})
+        
+        cost_summary = _aggregate_costs(result)
+        logger.info(
+            "News pipeline completed",
+            run_id=initial_state["run_id"],
+            topic=topic,
+            cost_summary=cost_summary,
+            stories_selected=len(result.get("selected", [])),
+            sent=result.get("sent", False),
+        )
+        
+        result["cost_summary"] = cost_summary
         return result
     except Exception as e:
         memory.finish_run(initial_state["run_id"], "failed", error=str(e))

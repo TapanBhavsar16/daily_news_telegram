@@ -23,6 +23,9 @@ class MockBudget:
         self.fetches_used = 0
         self.search_calls_used = 0
         self.tokens_used = 0
+        self.prompt_tokens_used = 0
+        self.completion_tokens_used = 0
+        self.llm_calls = 0
         self.start_time = 0
         self.last_fact_step = 0
         self._exhausted = False
@@ -46,11 +49,29 @@ class MockBudget:
     def record_tokens(self, tokens):
         self.tokens_used += tokens
 
+    def record_token_usage(self, prompt_tokens=0, completion_tokens=0, total_tokens=0):
+        self.prompt_tokens_used += prompt_tokens
+        self.completion_tokens_used += completion_tokens
+        self.tokens_used += total_tokens
+        self.llm_calls += 1
+
     def record_fact(self):
         self.last_fact_step = self.steps_used
 
     def remaining_summary(self):
         return f"Steps: {self.steps_used}/{self.max_steps}"
+
+    def cost_summary(self):
+        return {
+            "total_tokens": self.tokens_used,
+            "prompt_tokens": self.prompt_tokens_used,
+            "completion_tokens": self.completion_tokens_used,
+            "llm_calls": self.llm_calls,
+            "steps_used": self.steps_used,
+            "fetches_used": self.fetches_used,
+            "searches_used": self.search_calls_used,
+            "wall_time_seconds": 1.0,
+        }
 
     def get_budget_status(self):
         return {

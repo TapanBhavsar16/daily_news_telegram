@@ -26,8 +26,11 @@ class Budget:
     fetches_used: int = 0
     search_calls_used: int = 0
     tokens_used: int = 0
+    prompt_tokens_used: int = 0
+    completion_tokens_used: int = 0
     start_time: float = field(default_factory=time.time)
     last_fact_step: int = 0
+    llm_calls: int = 0
 
     def exhausted(self) -> bool:
         return (
@@ -53,6 +56,12 @@ class Budget:
     def record_tokens(self, tokens: int):
         self.tokens_used += tokens
 
+    def record_token_usage(self, prompt_tokens: int, completion_tokens: int, total_tokens: int):
+        self.prompt_tokens_used += prompt_tokens
+        self.completion_tokens_used += completion_tokens
+        self.tokens_used += total_tokens
+        self.llm_calls += 1
+
     def record_fact(self):
         self.last_fact_step = self.steps_used
 
@@ -61,9 +70,23 @@ class Budget:
             f"Steps: {self.steps_used}/{self.max_steps}, "
             f"Fetches: {self.fetches_used}/{self.max_fetches}, "
             f"Searches: {self.search_calls_used}/{self.max_search_calls}, "
-            f"Tokens: {self.tokens_used}/{self.max_tokens_total}, "
+            f"Tokens: {self.tokens_used}/{self.max_tokens_total} (prompt: {self.prompt_tokens_used}, completion: {self.completion_tokens_used}), "
+            f"LLM calls: {self.llm_calls}, "
             f"Time: {time.time() - self.start_time:.0f}/{self.wall_clock_seconds}s"
         )
+
+    def cost_summary(self) -> dict[str, Any]:
+        """Return cost summary for logging."""
+        return {
+            "total_tokens": self.tokens_used,
+            "prompt_tokens": self.prompt_tokens_used,
+            "completion_tokens": self.completion_tokens_used,
+            "llm_calls": self.llm_calls,
+            "steps_used": self.steps_used,
+            "fetches_used": self.fetches_used,
+            "search_calls_used": self.search_calls_used,
+            "wall_time_seconds": time.time() - self.start_time,
+        }
 
 
 @dataclass

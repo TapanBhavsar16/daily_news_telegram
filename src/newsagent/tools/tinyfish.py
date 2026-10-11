@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, Field
-from tenacity import retry, stop_after_attempt, wait_exponential_jitter
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
 
 from newsagent.config import Config, TinyFishConfig, get_settings, get_tinyfish_api_key
 from newsagent.logging import get_logger
@@ -68,8 +68,9 @@ class TinyFishClient:
         )
 
     @retry(
-        wait=wait_exponential_jitter(initial=1, max=10),
-        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=1, max=30),
+        stop=stop_after_attempt(5),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException)),
     )
     async def search(
         self,
@@ -91,9 +92,15 @@ class TinyFishClient:
         if recency_days:
             params["recency_days"] = recency_days
 
-        response = await self._client.get("/search", params=params)
-        response.raise_for_status()
-        data = response.json()
+        try:
+            response = await self._client.get("/search", params=params)
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                logger.warning("Rate limited by TinyFish search", query=query)
+                raise
+            raise
 
         results = [
             SearchResult(
@@ -115,8 +122,9 @@ class TinyFishClient:
         return result
 
     @retry(
-        wait=wait_exponential_jitter(initial=1, max=10),
-        stop=stop_after_attempt(3),
+        wait=wait_exponential_jitter(initial=1, max=30),
+        stop=stop_after_attempt(5),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException)),
     )
     async def fetch(
         self,
@@ -129,12 +137,18 @@ class TinyFishClient:
             logger.debug("Cache hit for fetch", urls=urls)
             return self._cache[cache_key]
 
-        response = await self._client.post(
-            "/fetch",
-            json={"urls": urls, "format": format, "max_chars": max_chars},
-        )
-        response.raise_for_status()
-        data = response.json()
+        try:
+            response = await self._client.post(
+                "/fetch",
+                json={"urls": urls, "format": format, "max_chars": max_chars},
+            )
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                logger.warning("Rate limited by TinyFish fetch", urls=urls)
+                raise
+            raise
 
         results = []
         errors = []

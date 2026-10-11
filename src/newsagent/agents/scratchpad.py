@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -11,6 +12,36 @@ from newsagent.config import Config, ScratchpadConfig
 from newsagent.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+INJECTION_PATTERNS = [
+    r"(?i)SYSTEM\s*:",
+    r"(?i)Ignore\s+(?:previous|above|all)?\s*(?:previous|above)?\s*(?:instructions|prompts?)",
+    r"(?i)Override\s+(system|previous|all)",
+    r"(?i)Forget\s+(everything|all|previous|above)",
+    r"(?i)New\s+instructions?",
+    r"(?i)Assistant\s*:",
+    r"(?i)Human\s*:",
+    r"(?i)User\s*:",
+    r"(?i)<\|.*?\|>",
+    r"(?i)```\s*(system|prompt|instruction)",
+]
+
+
+def sanitize_content(content: str) -> str:
+    """Remove potential prompt injection patterns from content."""
+    lines = content.split("\n")
+    cleaned_lines = []
+    for line in lines:
+        is_injection = False
+        for pattern in INJECTION_PATTERNS:
+            if re.search(pattern, line.strip()):
+                is_injection = True
+                logger.warning("Filtered potential injection pattern", line=line[:100])
+                break
+        if not is_injection:
+            cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
 
 
 @dataclass
@@ -128,14 +159,15 @@ class Scratchpad:
 
         if action == "write":
             self._validate_fact_note(key, source_urls)
-            if len(content) > self.config.max_note_chars:
+            sanitized_content = sanitize_content(content)
+            if len(sanitized_content) > self.config.max_note_chars:
                 raise ValueError(f"Note exceeds max_note_chars ({self.config.max_note_chars})")
-            if self._total_chars() + len(content) > self.config.max_total_chars:
+            if self._total_chars() + len(sanitized_content) > self.config.max_total_chars:
                 raise ValueError(f"Total scratchpad size would exceed max_total_chars ({self.config.max_total_chars})")
 
             self._notes[key] = ScratchpadNote(
                 key=key,
-                content=content,
+                content=sanitized_content,
                 source_urls=source_urls,
                 updated_at=time.time(),
             )
@@ -146,10 +178,11 @@ class Scratchpad:
             if key not in self._notes:
                 raise ValueError(f"Note '{key}' does not exist, use 'write' to create")
             existing = self._notes[key]
-            new_content = existing.content + "\n" + content
+            sanitized_content = sanitize_content(content)
+            new_content = existing.content + "\n" + sanitized_content
             if len(new_content) > self.config.max_note_chars:
                 raise ValueError(f"Note would exceed max_note_chars ({self.config.max_note_chars})")
-            if self._total_chars() + len(content) > self.config.max_total_chars:
+            if self._total_chars() + len(sanitized_content) > self.config.max_total_chars:
                 raise ValueError(f"Total scratchpad size would exceed max_total_chars ({self.config.max_total_chars})")
 
             existing.content = new_content

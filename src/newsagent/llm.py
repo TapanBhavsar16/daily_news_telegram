@@ -8,8 +8,13 @@ from typing import Any, Callable, Optional
 
 import litellm
 from pydantic import BaseModel, ValidationError
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
+import httpx
 
 from newsagent.config import AgentConfig, Config, get_settings
+from newsagent.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -96,20 +101,35 @@ class NativeToolClient(LLMClient):
 
         for model in models_to_try:
             try:
-                response = litellm.completion(
+                response = self._call_with_retry(
                     model=model,
                     messages=formatted_messages,
                     tools=tool_schemas,
-                    tool_choice="auto" if tool_schemas else None,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
                 return self._parse_response(response)
             except Exception as e:
                 last_error = e
+                logger.warning("Model failed, trying fallback", model=model, error=str(e))
                 continue
 
         raise RuntimeError(f"All models failed. Last error: {last_error}")
+
+    @retry(
+        wait=wait_exponential_jitter(initial=1, max=60),
+        stop=stop_after_attempt(3),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException, litellm.RateLimitError)),
+    )
+    def _call_with_retry(self, model: str, messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]], temperature: float, max_tokens: Optional[int]) -> Any:
+        return litellm.completion(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto" if tools else None,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
     def _parse_response(self, response: Any) -> ChatResponse:
         message = response.choices[0].message
@@ -188,7 +208,7 @@ Only call one tool per response. No extra text outside the JSON.
 
         for model in models_to_try:
             try:
-                response = litellm.completion(
+                response = self._call_with_retry(
                     model=model,
                     messages=formatted_messages,
                     temperature=temperature,
@@ -197,9 +217,23 @@ Only call one tool per response. No extra text outside the JSON.
                 return self._parse_json_response(response)
             except Exception as e:
                 last_error = e
+                logger.warning("Model failed, trying fallback", model=model, error=str(e))
                 continue
 
         raise RuntimeError(f"All models failed. Last error: {last_error}")
+
+    @retry(
+        wait=wait_exponential_jitter(initial=1, max=60),
+        stop=stop_after_attempt(3),
+        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException, litellm.RateLimitError)),
+    )
+    def _call_with_retry(self, model: str, messages: list[dict[str, Any]], temperature: float, max_tokens: Optional[int]) -> Any:
+        return litellm.completion(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
     def _parse_json_response(self, response: Any) -> ChatResponse:
         import re
