@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
 import uuid
 from typing import Any
 
-from langgraph.checkpoint.sqlite import SqliteSaver
+import aiosqlite
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 
 from newsagent.config import Config, load_config
@@ -21,9 +21,10 @@ from newsagent.graph.nodes import (
     rank_select_node,
     research_agent_node,
     save_memory_node,
-    shortlist_node,
     should_backfill,
+    should_research,
     should_widen_queries,
+    shortlist_node,
     verify_recency_node,
     widen_queries_node,
 )
@@ -62,7 +63,7 @@ def create_initial_state(
     )
 
 
-def build_graph(config: Config | None = None, checkpointer: SqliteSaver | None = None):
+def build_graph(config: Config | None = None, checkpointer: AsyncSqliteSaver | None = None):
     config = config or load_config()
 
     graph = StateGraph(TopicState)
@@ -92,7 +93,10 @@ def build_graph(config: Config | None = None, checkpointer: SqliteSaver | None =
         "shortlist": "fan_out",
     })
     graph.add_edge("widen_queries", "discover")
-    graph.add_edge("fan_out", "research_agent")
+    graph.add_conditional_edges("fan_out", should_research, {
+        "research_agent": "research_agent",
+        "collect": "collect",
+    })
     graph.add_edge("research_agent", "collect")
     graph.add_edge("collect", "verify_recency")
     graph.add_edge("verify_recency", "rank_select")
@@ -110,8 +114,8 @@ def build_graph(config: Config | None = None, checkpointer: SqliteSaver | None =
         db_path = config.database.path
         import os
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
+        conn = aiosqlite.connect(db_path)
+        checkpointer = AsyncSqliteSaver(conn)
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -156,7 +160,16 @@ async def run_news_pipeline(
     memory.start_run(initial_state["run_id"], topic)
 
     try:
-        result = await graph.ainvoke(initial_state, config={"recursion_limit": 100})
+        result = await graph.ainvoke(
+            initial_state,
+            config={
+                "recursion_limit": 100,
+                "configurable": {
+                    "thread_id": initial_state["run_id"],
+                    "app_config": config,
+                },
+            },
+        )
         
         cost_summary = _aggregate_costs(result)
         logger.info(

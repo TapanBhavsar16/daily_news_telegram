@@ -26,4 +26,5 @@ __all__ = [
     "save_memory_node",
     "should_widen_queries",
     "should_backfill",
+    "should_research",
 ]

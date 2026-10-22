@@ -17,6 +17,7 @@ from newsagent.logging import get_logger
 from newsagent.memory.store import MemoryStore
 from newsagent.tools.telegram import send_telegram_message
 from newsagent.tools.tinyfish import search_web
+from langgraph.config import get_config
 
 logger = get_logger(__name__)
 
@@ -48,12 +49,11 @@ Return ONLY a JSON array of strings. Example:
 ["AI chip export controls October 2026", "Nvidia H200 Blackwell launch", "AMD MI300X data center adoption"]"""
 
     from newsagent.llm import create_llm_client
-    from newsagent.config import AgentConfig
 
-    config = Config()
+    config: Config = get_config()["configurable"]["app_config"]
     llm = create_llm_client(config.agent, config)
 
-    response = await llm.chat(
+    response = llm.chat(
         messages=[{"role": "user", "content": system_prompt}],
         temperature=0.3,
     )
@@ -152,10 +152,10 @@ Candidates:
 Return ONLY a JSON array of indices (0-based) of the selected candidates. Example: [0, 2, 5]"""
 
     from newsagent.llm import create_llm_client
-    config = Config()
+    config: Config = get_config()["configurable"]["app_config"]
     llm = create_llm_client(config.agent, config)
 
-    response = await llm.chat(
+    response = llm.chat(
         messages=[{"role": "user", "content": system_prompt}],
         temperature=0.2,
     )
@@ -188,10 +188,10 @@ Try: synonyms, subtopics, adjacent angles, "last 24 hours", regional variations,
 Return ONLY a JSON array of strings."""
 
     from newsagent.llm import create_llm_client
-    config = Config()
+    config: Config = get_config()["configurable"]["app_config"]
     llm = create_llm_client(config.agent, config)
 
-    response = await llm.chat(
+    response = llm.chat(
         messages=[{"role": "user", "content": system_prompt}],
         temperature=0.4,
     )
@@ -216,6 +216,9 @@ async def fan_out_node(state: TopicState):
     limited = candidates[:max_parallel]
 
     logger.info("Fanning out to research agents", count=len(limited), max_parallel=max_parallel)
+
+    if not limited:
+        return {}
 
     sends = []
     for i, candidate in enumerate(limited):
@@ -266,7 +269,7 @@ async def research_agent_node(state: dict[str, Any]) -> dict[str, Any]:
 
     result: ResearchResult = await run_research(
         goal,
-        config=Config(),
+        config=get_config()["configurable"]["app_config"],
         run_id=run_id,
         agent_id=agent_id,
     )
@@ -352,10 +355,10 @@ Research results:
 Return ONLY a JSON array of indices (0-based) of the top {items_per_topic} stories. Example: [0, 2, 1]"""
 
     from newsagent.llm import create_llm_client
-    config = Config()
+    config: Config = get_config()["configurable"]["app_config"]
     llm = create_llm_client(config.agent, config)
 
-    response = await llm.chat(
+    response = llm.chat(
         messages=[{"role": "user", "content": system_prompt}],
         temperature=0.2,
     )
@@ -586,3 +589,10 @@ def should_backfill(state: TopicState) -> str:
     if len(selected) >= items_per_topic or backfill_rounds >= max_backfill:
         return "compose"
     return "backfill"
+
+
+def should_research(state: TopicState) -> str:
+    candidates = state.get("candidates", [])
+    if not candidates:
+        return "collect"
+    return "research_agent"

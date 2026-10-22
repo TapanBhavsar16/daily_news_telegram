@@ -322,6 +322,7 @@ def create_llm_client(config: AgentConfig, llm_config: Config) -> LLMClient:
     settings = get_settings()
     api_key = settings.NVIDIA_API_KEY or settings.OPENAI_API_KEY
     if api_key:
+        os.environ["NVIDIA_NIM_API_KEY"] = api_key
         os.environ["NVIDIA_API_KEY"] = api_key
         os.environ["OPENAI_API_KEY"] = api_key
 
@@ -354,6 +355,7 @@ def create_small_llm_client(config: AgentConfig, llm_config: Config) -> LLMClien
     settings = get_settings()
     api_key = settings.NVIDIA_API_KEY or settings.OPENAI_API_KEY
     if api_key:
+        os.environ["NVIDIA_NIM_API_KEY"] = api_key
         os.environ["NVIDIA_API_KEY"] = api_key
         os.environ["OPENAI_API_KEY"] = api_key
 
