@@ -1,9 +1,9 @@
 llm:
-  model: "nvidia_nim/nvidia/nemotron-3-ultra-550b-a55b"
-  small_model: "nvidia_nim/nvidia/nemotron-3.5-lightning-30b-a3b"
+  model: "nvidia_nim/nvidia/nemotron-3.5-super-vl-120b-a12b"
+  small_model: "nvidia_nim/nvidia/nemotron-3.5-super-vl-120b-a12b"
   fallbacks: []
 agent:
-  tool_mode: native
+  tool_mode: json
   max_steps: 20
   max_fetches: 8
   max_search_calls: 6

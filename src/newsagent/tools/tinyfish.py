@@ -1,14 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import re
-import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-import httpx
 from pydantic import BaseModel, Field
-from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
+from tinyfish import TinyFish
 
 from newsagent.config import Config, TinyFishConfig, get_settings, get_tinyfish_api_key
 from newsagent.logging import get_logger
@@ -33,7 +32,7 @@ class FetchResult(BaseModel):
     title: str
     url: str
     text: str
-    outbound_links: list[Link] = Field(default_factory=list)
+    outbound_links: list["Link"] = Field(default_factory=list)
     content_type: str = "text/html"
     status_code: int = 200
 
@@ -45,7 +44,7 @@ class Link(BaseModel):
 
 class FetchResponse(BaseModel):
     results: list[FetchResult] = Field(default_factory=list)
-    errors: list[FetchError] = Field(default_factory=list)
+    errors: list["FetchError"] = Field(default_factory=list)
 
 
 class FetchError(BaseModel):
@@ -56,22 +55,17 @@ class FetchError(BaseModel):
 @dataclass
 class TinyFishClient:
     api_key: str
-    base_url: str = "https://api.tinyfish.io/v1"
+    base_url: str = "https://agent.tinyfish.ai"
     timeout: float = 30.0
     _cache: dict[str, Any] = field(default_factory=dict, init=False)
 
     def __post_init__(self):
-        self._client = httpx.AsyncClient(
+        self._sdk = TinyFish(
+            api_key=self.api_key,
             base_url=self.base_url,
-            headers={"Authorization": f"Bearer {self.api_key}"},
             timeout=self.timeout,
         )
 
-    @retry(
-        wait=wait_exponential_jitter(initial=1, max=30),
-        stop=stop_after_attempt(5),
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException)),
-    )
     async def search(
         self,
         query: str,
@@ -84,48 +78,34 @@ class TinyFishClient:
             logger.debug("Cache hit for search", query=query)
             return self._cache[cache_key]
 
-        params = {
-            "query": query,
-            "num_results": num_results,
-            "location": location,
-        }
-        if recency_days:
-            params["recency_days"] = recency_days
+        recency_minutes = recency_days * 24 * 60 if recency_days else None
 
-        try:
-            response = await self._client.get("/search", params=params)
-            response.raise_for_status()
-            data = response.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429:
-                logger.warning("Rate limited by TinyFish search", query=query)
-                raise
-            raise
-
-        results = [
-            SearchResult(
-                title=r.get("title", ""),
-                url=r.get("url", ""),
-                snippet=r.get("snippet", ""),
-                position=i,
+        def _call() -> SearchResponse:
+            resp = self._sdk.search.query(
+                query=query,
+                location=location,
+                recency_minutes=recency_minutes,
             )
-            for i, r in enumerate(data.get("results", []))
-        ]
+            results = [
+                SearchResult(
+                    title=r.title,
+                    url=r.url,
+                    snippet=r.snippet,
+                    position=i,
+                )
+                for i, r in enumerate(resp.results)
+            ]
+            return SearchResponse(
+                results=results,
+                query=resp.query,
+                total_results=resp.total_results,
+            )
 
-        result = SearchResponse(
-            results=results,
-            query=query,
-            total_results=data.get("total_results", len(results)),
-        )
+        result = await asyncio.to_thread(_call)
         self._cache[cache_key] = result
-        logger.info("Search completed", query=query, results=len(results))
+        logger.info("Search completed", query=query, results=len(result.results))
         return result
 
-    @retry(
-        wait=wait_exponential_jitter(initial=1, max=30),
-        stop=stop_after_attempt(5),
-        retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.TimeoutException)),
-    )
     async def fetch(
         self,
         urls: list[str],
@@ -137,48 +117,41 @@ class TinyFishClient:
             logger.debug("Cache hit for fetch", urls=urls)
             return self._cache[cache_key]
 
-        try:
-            response = await self._client.post(
-                "/fetch",
-                json={"urls": urls, "format": format, "max_chars": max_chars},
+        def _call() -> FetchResponse:
+            resp = self._sdk.fetch.get_contents(
+                urls=urls,
+                format=format,
             )
-            response.raise_for_status()
-            data = response.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429:
-                logger.warning("Rate limited by TinyFish fetch", urls=urls)
-                raise
-            raise
+            results = []
+            errors = []
 
-        results = []
-        errors = []
+            for item in resp.results:
+                url = item.url
+                text = item.text or ""
+                if len(text) > max_chars:
+                    text = text[:max_chars] + f"\n\n[Truncated at {max_chars} chars]"
 
-        for item in data.get("results", []):
-            url = item.get("url", "")
-            if "error" in item:
-                errors.append(FetchError(url=url, error=item["error"]))
-                continue
+                outbound_links = self._extract_links(text, url)
 
-            text = item.get("text", "") or item.get("markdown", "") or ""
-            if len(text) > max_chars:
-                text = text[:max_chars] + f"\n\n[Truncated at {max_chars} chars]"
-
-            outbound_links = self._extract_links(text, url)
-
-            results.append(
-                FetchResult(
-                    title=item.get("title", ""),
-                    url=url,
-                    text=text,
-                    outbound_links=outbound_links,
-                    content_type=item.get("content_type", "text/html"),
-                    status_code=item.get("status_code", 200),
+                results.append(
+                    FetchResult(
+                        title=item.title or "",
+                        url=url,
+                        text=text,
+                        outbound_links=outbound_links,
+                        content_type=item.format or "text/html",
+                        status_code=200,
+                    )
                 )
-            )
 
-        result = FetchResponse(results=results, errors=errors)
+            for item in resp.errors:
+                errors.append(FetchError(url=item.url, error=item.error))
+
+            return FetchResponse(results=results, errors=errors)
+
+        result = await asyncio.to_thread(_call)
         self._cache[cache_key] = result
-        logger.info("Fetch completed", urls=len(urls), success=len(results), errors=len(errors))
+        logger.info("Fetch completed", urls=len(urls), success=len(result.results), errors=len(result.errors))
         return result
 
     def _extract_links(self, text: str, base_url: str) -> list[Link]:
@@ -226,7 +199,7 @@ class TinyFishClient:
             return False
 
     async def close(self):
-        await self._client.aclose()
+        return None
 
     def clear_cache(self):
         self._cache.clear()
@@ -235,7 +208,11 @@ class TinyFishClient:
 def create_tinyfish_client(config: Config = None) -> TinyFishClient:
     settings = get_settings()
     api_key = get_tinyfish_api_key(settings)
-    return TinyFishClient(api_key=api_key)
+    base_url = config.tinyfish.base_url if config else None
+    return TinyFishClient(
+        api_key=api_key,
+        base_url=base_url,
+    )
 
 
 async def search_web(

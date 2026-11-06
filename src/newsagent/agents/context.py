@@ -49,7 +49,22 @@ def render_state(
 ) -> str:
     parts = []
 
-    budget_info = budget.get_budget_status()
+    import time
+
+    elapsed = budget.elapsed_seconds() if hasattr(budget, "elapsed_seconds") else max(
+        0.0, time.time() - getattr(budget, "start_time", time.time())
+    )
+    budget_info = {
+        "steps_used": budget.steps_used,
+        "steps_remaining": max(0, budget.max_steps - budget.steps_used),
+        "fetches_used": budget.fetches_used,
+        "fetches_remaining": max(0, budget.max_fetches - budget.fetches_used),
+        "searches_used": budget.search_calls_used,
+        "searches_remaining": max(0, budget.max_search_calls - budget.search_calls_used),
+        "time_elapsed": elapsed,
+        "time_remaining": max(0, budget.wall_clock_seconds - elapsed),
+        "stalled": budget.stalled(budget.stall_steps),
+    }
     parts.append(
         f"BUDGET: Steps {budget_info['steps_used']}/{budget_info['steps_remaining'] + budget_info['steps_used']}, "
         f"Fetches {budget_info['fetches_used']}/{budget_info['fetches_remaining'] + budget_info['fetches_used']}, "

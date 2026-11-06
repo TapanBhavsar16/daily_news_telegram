@@ -22,7 +22,7 @@ class ScratchpadConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    tool_mode: str = "auto"
+    tool_mode: str = "json"
     max_steps: int = 20
     max_fetches: int = 8
     max_search_calls: int = 6
@@ -52,6 +52,7 @@ class NewsConfig(BaseModel):
 
 class TinyFishConfig(BaseModel):
     api_key_env: str = "TINYFISH_API_KEY"
+    base_url: str = "https://agent.tinyfish.ai"
 
 
 class TelegramConfig(BaseModel):
@@ -94,6 +95,7 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: Optional[str] = None
     NVIDIA_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    OPENAI_BASE_URL: Optional[str] = None
 
 
 def load_config(config_path: Optional[str] = None) -> Config:

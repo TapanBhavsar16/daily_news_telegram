@@ -181,8 +181,19 @@ async def send_telegram_message(
     disable_web_page_preview: bool = True,
 ) -> SendResult:
     settings = get_settings()
-    bot_token = get_telegram_bot_token(settings)
-    chat_id = get_telegram_chat_id(settings)
+    tg_config = config.telegram if config else None
+    bot_token_name = tg_config.bot_token_env if tg_config else "TELEGRAM_BOT_TOKEN"
+    chat_id_name = tg_config.chat_id_env if tg_config else "TELEGRAM_CHAT_ID"
+    bot_token = getattr(settings, bot_token_name, None)
+    chat_id = getattr(settings, chat_id_name, None)
+    if not bot_token:
+        raise ValueError(f"{bot_token_name} not set in environment")
+    if not chat_id:
+        raise ValueError(f"{chat_id_name} not set in environment")
+
+    if tg_config:
+        parse_mode = tg_config.parse_mode
+        disable_web_page_preview = tg_config.disable_web_page_preview
 
     client = TelegramClient(
         bot_token=bot_token,

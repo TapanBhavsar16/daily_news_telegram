@@ -297,7 +297,17 @@ class MemoryStore:
                 """,
                 (time.time(), telegram_message_id, pending_id),
             )
-            return cursor.rowcount > 0
+        return cursor.rowcount > 0
+
+    def mark_pending_failed(self, pending_id: str, error: str) -> bool:
+        self._init_db()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM pending_posts WHERE id = ? AND sent_at IS NULL",
+                (pending_id,),
+            )
+        logger.warning("Pending post removed after failed delivery", pending_id=pending_id, error=error)
+        return cursor.rowcount > 0
 
     def get_unsent_pending(self, topic: str) -> list[PendingPost]:
         self._init_db()

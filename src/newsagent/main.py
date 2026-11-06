@@ -78,6 +78,8 @@ def run(
     result = asyncio.run(_run_news_pipeline(topic, config, freshness_days, run_id))
 
     _display_pipeline_result(result)
+    if result.get("errors") or not result.get("sent"):
+        raise typer.Exit(code=1)
 
 
 async def _run_research(question: str, config: Config) -> ResearchResult:

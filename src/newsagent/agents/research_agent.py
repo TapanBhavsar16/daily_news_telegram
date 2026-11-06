@@ -292,10 +292,12 @@ async def research(
     llm_client: Optional[LLMClient] = None,
     tool_registry: Optional[ToolRegistry] = None,
     tinyfish_client: Optional[Any] = None,
+    run_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> ResearchResult:
     config = config or Config()
     agent = ResearchAgent(config, llm_client, tool_registry, tinyfish_client)
-    return await agent.research(goal=question)
+    return await agent.research(goal=question, run_id=run_id, agent_id=agent_id)
 
 
 from newsagent.agents.context import (

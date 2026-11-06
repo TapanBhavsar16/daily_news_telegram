@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,6 +22,16 @@ from newsagent.tools import (
     escape_html,
 )
 from newsagent.tools.tinyfish import search_web, fetch_pages
+from newsagent.graph.build import build_graph, create_initial_state
+from newsagent.graph.nodes import (
+    compose_node,
+    fan_out_dispatch,
+    post_telegram_node,
+    verify_recency_node,
+)
+from newsagent.memory.store import create_memory_store
+from newsagent.tools.telegram import SendResult
+from langgraph.types import Send
 
 
 class MockHTTPResponse:
@@ -420,6 +431,236 @@ async def test_full_posted_item_persistence():
     )
     assert is_dup is True
     assert "URL already posted" in reason or "Title already posted" in reason or "Content already posted" in reason
+
+
+def test_fan_out_dispatch_returns_send_commands_not_node_output():
+    state = {
+        "candidates": [{"title": "Story", "url": "https://example.com", "snippet": "News"}],
+        "max_parallel_agents": 2,
+        "topic": "Test",
+        "run_id": "run-1",
+    }
+    sends = fan_out_dispatch(state)
+    assert len(sends) == 1
+    assert isinstance(sends[0], Send)
+
+
+@pytest.mark.asyncio
+async def test_build_graph_compiles_with_dynamic_research_dispatch():
+    config = Config()
+    config.database.path = "/tmp/opencode/newsagent-graph-build-test.db"
+
+    graph = build_graph(config)
+
+    assert graph is not None
+
+
+@pytest.mark.asyncio
+async def test_post_telegram_node_uses_config_and_records_send_result(tmp_path):
+    config = Config()
+    config.database.path = str(tmp_path / "newsagent.db")
+    run_id = "telegram-result-test"
+    selected = [{
+        "candidate": {"title": "Test Story", "url": "https://example.com/story"},
+        "answer": "A verified test story.",
+        "sources": ["https://example.com/story"],
+        "notes": {"facts_1": "Fact"},
+        "fetches_used": 1,
+    }]
+    memory = create_memory_store(config)
+    memory.start_run(run_id, "Test")
+
+    with patch("newsagent.graph.nodes.send_telegram_message", new=AsyncMock(
+        return_value=SendResult(success=True, message_id=987)
+    )) as send:
+        with patch("newsagent.graph.nodes.MemoryStore", return_value=memory):
+            result = await post_telegram_node({
+                "message": "<b>Test</b>", "run_id": run_id, "topic": "Test",
+                "selected": selected, "config": config,
+            })
+
+    assert result["sent"] is True
+    assert send.await_args.kwargs["config"] is config
+    assert send.await_args.args == ("<b>Test</b>",)
+    pending = memory.get_unsent_pending("Test")
+    assert pending == []
+    with sqlite3.connect(config.database.path) as conn:
+        saved_id = conn.execute(
+            "SELECT telegram_message_id FROM pending_posts WHERE topic = ?", ("Test",)
+        ).fetchone()
+    assert saved_id[0] == 987
+    stored = memory.get_recent_posts("Test", days=1)
+    assert stored[0].title == "Test Story"
+
+
+@pytest.mark.asyncio
+async def test_graph_fanout_research_and_telegram_pipeline(tmp_path):
+    from langgraph.graph import END, START, StateGraph
+
+    from newsagent.graph.state import TopicState
+
+    config = Config()
+    config.database.path = str(tmp_path / "pipeline.db")
+    config.news.items_per_topic = 1
+    config.news.max_backfill_rounds = 0
+
+    async def discover(_state):
+        return {"candidates": [{
+            "title": "Pipeline E2E story",
+            "url": "https://example.com/pipeline-e2e",
+            "snippet": "Mocked discovery",
+        }]}
+
+    async def research_child(state):
+        return {"research": [{
+            "candidate": state["candidate"],
+            "answer": "A mocked verified story.",
+            "confidence": 0.9,
+            "open_gaps": [],
+            "sources": [state["candidate"]["url"]],
+            "notes": {"facts_1": "Mocked fact"},
+            "fetches_used": 1,
+        }]}
+
+    async def rank(state):
+        return {"selected": state.get("research", [])[:1]}
+
+    async def post(state):
+        assert state["message"]
+        return {"sent": True}
+
+    graph = StateGraph(TopicState)
+    graph.add_node("discover", discover)
+    graph.add_node("fan_out", lambda _state: {})
+    graph.add_node("research_agent", research_child)
+    graph.add_node("collect", lambda _state: {})
+    graph.add_node("verify_recency", verify_recency_node)
+    graph.add_node("rank_select", rank)
+    graph.add_node("dedupe_story", lambda state: {"selected": state["selected"]})
+    graph.add_node("compose", compose_node)
+    graph.add_node("post_telegram", post)
+    graph.add_node("save_memory", lambda _state: {})
+    graph.add_edge(START, "discover")
+    graph.add_edge("discover", "fan_out")
+    graph.add_conditional_edges("fan_out", fan_out_dispatch)
+    graph.add_edge("research_agent", "collect")
+    graph.add_edge("collect", "verify_recency")
+    graph.add_edge("verify_recency", "rank_select")
+    graph.add_edge("rank_select", "dedupe_story")
+    graph.add_edge("dedupe_story", "compose")
+    graph.add_edge("compose", "post_telegram")
+    graph.add_edge("post_telegram", "save_memory")
+    graph.add_edge("save_memory", END)
+
+    result = await graph.compile().ainvoke(
+        create_initial_state("Pipeline E2E story", config, run_id="pipeline-e2e"),
+        config={"configurable": {"app_config": config}},
+    )
+
+    assert result["selected"]
+    assert result["message"]
+    assert result["sent"] is True
+
+
+@pytest.mark.asyncio
+async def test_discover_node_normalizes_tinyfish_search_response(monkeypatch):
+    from newsagent.graph import nodes
+    from newsagent.tools.tinyfish import SearchResponse, SearchResult
+
+    async def search(_query, **_kwargs):
+        return SearchResponse(results=[SearchResult(
+            title="AI accelerator launch",
+            url="https://example.com/accelerator",
+            snippet="A new accelerator was announced.",
+        )])
+
+    monkeypatch.setattr(nodes, "search_web", search)
+
+    result = await nodes.discover_node({"queries": ["AI chips"]})
+
+    assert len(result["candidates"]) == 1
+    assert result["candidates"][0]["url"] == "https://example.com/accelerator"
+
+
+@pytest.mark.asyncio
+async def test_research_agent_node_passes_run_and_agent_ids(monkeypatch):
+    from newsagent.graph import nodes
+    from newsagent.agents.research_agent import ResearchResult
+
+    captured = {}
+
+    async def fake_research(goal, **kwargs):
+        captured.update(kwargs)
+        return ResearchResult(
+            answer="Verified.", confidence=0.9, open_gaps=[], sources=[], notes={},
+            steps_used=1, fetches_used=0, searches_used=0, tokens_used=1,
+            wall_time_seconds=0.01, run_id=kwargs["run_id"], agent_id=kwargs["agent_id"],
+        )
+
+    monkeypatch.setattr(nodes, "run_research", fake_research)
+    result = await nodes.research_agent_node({
+        "goal": "Research a test story", "candidate": {"title": "Test", "url": "https://example.com"},
+        "agent_index": 2, "run_id": "run-test", "topic": "Testing", "config": Config(),
+    })
+
+    assert captured["run_id"] == "run-test"
+    assert captured["agent_id"] == "research_run-test_2"
+    assert result["research"][0]["answer"] == "Verified."
+
+
+@pytest.mark.asyncio
+async def test_post_telegram_node_treats_send_result_failure_as_failure(tmp_path):
+    config = Config()
+    config.database.path = str(tmp_path / "newsagent.db")
+    run_id = "telegram-failure-test"
+    memory = create_memory_store(config)
+    memory.start_run(run_id, "Test")
+    selected = [{
+        "candidate": {"title": "Test Story", "url": "https://example.com/story"},
+        "answer": "A verified test story.", "sources": [], "notes": {},
+    }]
+
+    with patch("newsagent.graph.nodes.send_telegram_message", new=AsyncMock(
+        return_value=SendResult(success=False, error="chat not found")
+    )):
+        with patch("newsagent.graph.nodes.MemoryStore", return_value=memory):
+            result = await post_telegram_node({
+                "message": "<b>Test</b>", "run_id": run_id, "topic": "Test",
+                "selected": selected, "config": config,
+            })
+
+    assert result["sent"] is False
+    assert "chat not found" in result["errors"][0]
+    assert memory.get_recent_posts("Test", days=1) == []
+
+
+def test_config_exposes_openai_base_url_for_compatible_providers(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example/v1")
+
+    from newsagent.config import get_settings
+
+    settings = get_settings()
+
+    assert settings.OPENAI_API_KEY == "test-key"
+    assert settings.OPENAI_BASE_URL == "https://llm.example/v1"
+
+
+def test_render_state_reports_budget_using_registry_budget_api():
+    from newsagent.agents.context import render_state
+    from newsagent.tools.registry import Budget
+
+    class ScratchpadStub:
+        def render(self, limit_chars):
+            return ""
+
+    budget = Budget(max_steps=5, max_fetches=3, max_search_calls=4, stall_steps=2)
+    budget.record_step()
+    rendered = render_state(ScratchpadStub(), budget, max_chars=100)
+
+    assert "Steps 1/5" in rendered
+    assert "Fetches 0/3" in rendered
+    assert "Searches 0/4" in rendered
 
 
 if __name__ == "__main__":

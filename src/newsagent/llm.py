@@ -125,6 +125,8 @@ class NativeToolClient(LLMClient):
         return litellm.completion(
             model=model,
             messages=messages,
+            api_key=os.getenv("OPENAI_API_KEY") if model.startswith("openai/") else None,
+            api_base=os.getenv("OPENAI_BASE_URL") if model.startswith("openai/") else None,
             tools=tools,
             tool_choice="auto" if tools else None,
             temperature=temperature,
@@ -231,6 +233,8 @@ Only call one tool per response. No extra text outside the JSON.
         return litellm.completion(
             model=model,
             messages=messages,
+            api_key=os.getenv("OPENAI_API_KEY") if model.startswith("openai/") else None,
+            api_base=os.getenv("OPENAI_BASE_URL") if model.startswith("openai/") else None,
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -320,11 +324,13 @@ Only call one tool per response. No extra text outside the JSON.
 
 def create_llm_client(config: AgentConfig, llm_config: Config) -> LLMClient:
     settings = get_settings()
-    api_key = settings.NVIDIA_API_KEY or settings.OPENAI_API_KEY
-    if api_key:
-        os.environ["NVIDIA_NIM_API_KEY"] = api_key
-        os.environ["NVIDIA_API_KEY"] = api_key
-        os.environ["OPENAI_API_KEY"] = api_key
+    if settings.NVIDIA_API_KEY:
+        os.environ["NVIDIA_NIM_API_KEY"] = settings.NVIDIA_API_KEY
+        os.environ["NVIDIA_API_KEY"] = settings.NVIDIA_API_KEY
+    if settings.OPENAI_API_KEY:
+        os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
+    if settings.OPENAI_BASE_URL:
+        os.environ["OPENAI_BASE_URL"] = settings.OPENAI_BASE_URL
 
     tool_mode = config.tool_mode
 
@@ -353,11 +359,13 @@ def create_llm_client(config: AgentConfig, llm_config: Config) -> LLMClient:
 
 def create_small_llm_client(config: AgentConfig, llm_config: Config) -> LLMClient:
     settings = get_settings()
-    api_key = settings.NVIDIA_API_KEY or settings.OPENAI_API_KEY
-    if api_key:
-        os.environ["NVIDIA_NIM_API_KEY"] = api_key
-        os.environ["NVIDIA_API_KEY"] = api_key
-        os.environ["OPENAI_API_KEY"] = api_key
+    if settings.NVIDIA_API_KEY:
+        os.environ["NVIDIA_NIM_API_KEY"] = settings.NVIDIA_API_KEY
+        os.environ["NVIDIA_API_KEY"] = settings.NVIDIA_API_KEY
+    if settings.OPENAI_API_KEY:
+        os.environ["OPENAI_API_KEY"] = settings.OPENAI_API_KEY
+    if settings.OPENAI_BASE_URL:
+        os.environ["OPENAI_BASE_URL"] = settings.OPENAI_BASE_URL
 
     tool_mode = config.tool_mode
 

@@ -14,6 +14,7 @@ from newsagent.graph.nodes import (
     compose_node,
     dedupe_story_node,
     discover_node,
+    fan_out_dispatch,
     fan_out_node,
     filter_seen_node,
     plan_queries_node,
@@ -22,7 +23,6 @@ from newsagent.graph.nodes import (
     research_agent_node,
     save_memory_node,
     should_backfill,
-    should_research,
     should_widen_queries,
     shortlist_node,
     verify_recency_node,
@@ -93,10 +93,7 @@ def build_graph(config: Config | None = None, checkpointer: AsyncSqliteSaver | N
         "shortlist": "fan_out",
     })
     graph.add_edge("widen_queries", "discover")
-    graph.add_conditional_edges("fan_out", should_research, {
-        "research_agent": "research_agent",
-        "collect": "collect",
-    })
+    graph.add_conditional_edges("fan_out", fan_out_dispatch)
     graph.add_edge("research_agent", "collect")
     graph.add_edge("collect", "verify_recency")
     graph.add_edge("verify_recency", "rank_select")
@@ -109,13 +106,6 @@ def build_graph(config: Config | None = None, checkpointer: AsyncSqliteSaver | N
     graph.add_edge("compose", "post_telegram")
     graph.add_edge("post_telegram", "save_memory")
     graph.add_edge("save_memory", END)
-
-    if checkpointer is None:
-        db_path = config.database.path
-        import os
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        conn = aiosqlite.connect(db_path)
-        checkpointer = AsyncSqliteSaver(conn)
 
     return graph.compile(checkpointer=checkpointer)
 
@@ -153,8 +143,29 @@ async def run_news_pipeline(
 ) -> dict[str, Any]:
     config = config or load_config()
     initial_state = create_initial_state(topic, config, freshness_days, run_id)
+    initial_state["config"] = config
 
-    graph = build_graph(config)
+    if config.database.path:
+        import os
+
+        database_dir = os.path.dirname(config.database.path)
+        if database_dir:
+            os.makedirs(database_dir, exist_ok=True)
+        async with aiosqlite.connect(config.database.path) as conn:
+            checkpointer = AsyncSqliteSaver(conn)
+            graph = build_graph(config, checkpointer=checkpointer)
+            return await _invoke_pipeline(graph, initial_state, config, topic)
+
+    graph = build_graph(config, checkpointer=None)
+    return await _invoke_pipeline(graph, initial_state, config, topic)
+
+
+async def _invoke_pipeline(
+    graph,
+    initial_state: TopicState,
+    config: Config,
+    topic: str,
+) -> dict[str, Any]:
 
     memory = MemoryStore(config)
     memory.start_run(initial_state["run_id"], topic)
@@ -173,7 +184,7 @@ async def run_news_pipeline(
         
         cost_summary = _aggregate_costs(result)
         logger.info(
-            "News pipeline completed",
+            "News pipeline completed" if result.get("sent") else "News pipeline completed without delivery",
             run_id=initial_state["run_id"],
             topic=topic,
             cost_summary=cost_summary,
@@ -182,6 +193,8 @@ async def run_news_pipeline(
         )
         
         result["cost_summary"] = cost_summary
+        if not result.get("sent"):
+            result.setdefault("errors", []).append("Digest was not delivered to Telegram")
         return result
     except Exception as e:
         memory.finish_run(initial_state["run_id"], "failed", error=str(e))

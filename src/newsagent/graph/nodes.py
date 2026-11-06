@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from langchain_core.messages import HumanMessage
-from langgraph.constants import Send
+from langgraph.types import Send
 from langgraph.graph import StateGraph
 
 from newsagent.agents import research as run_research, ResearchResult
@@ -76,8 +76,19 @@ async def discover_node(state: TopicState) -> dict[str, Any]:
 
     for query in queries:
         try:
-            results = await search_web(query, num_results=10)
+            search_response = await search_web(query, num_results=10)
+            results = getattr(search_response, "results", search_response)
+            if isinstance(results, tuple):
+                results = results[0]
             for r in results:
+                if hasattr(r, "model_dump"):
+                    r = r.model_dump()
+                elif not isinstance(r, dict):
+                    r = {
+                        "title": getattr(r, "title", ""),
+                        "url": getattr(r, "url", ""),
+                        "snippet": getattr(r, "snippet", ""),
+                    }
                 url = r.get("url", "").strip()
                 if url and url not in seen_urls:
                     seen_urls.add(url)
@@ -94,7 +105,8 @@ async def filter_seen_node(state: TopicState) -> dict[str, Any]:
     run_id = state["run_id"]
     topic = state["topic"]
 
-    memory = MemoryStore()
+    config: Config = get_config()["configurable"]["app_config"]
+    memory = MemoryStore(config)
     memory._init_db()
 
     recent = memory.get_recent_posts(topic, days=state.get("freshness_days", 7))
@@ -207,21 +219,19 @@ Return ONLY a JSON array of strings."""
     return {"queries": queries, "round": round_num + 1}
 
 
-async def fan_out_node(state: TopicState):
-    candidates = state["candidates"]
-    max_parallel = state.get("max_parallel_agents", 3)
+async def fan_out_node(state: TopicState) -> dict[str, Any]:
+    logger.info("Fanning out to research agents", count=len(_build_research_sends(state)))
+    return {}
+
+
+def _build_research_sends(state: TopicState) -> list[Send]:
+    candidates = state.get("candidates", [])[: state.get("max_parallel_agents", 3)]
+    if not candidates:
+        return []
     topic = state["topic"]
     run_id = state["run_id"]
-
-    limited = candidates[:max_parallel]
-
-    logger.info("Fanning out to research agents", count=len(limited), max_parallel=max_parallel)
-
-    if not limited:
-        return {}
-
     sends = []
-    for i, candidate in enumerate(limited):
+    for index, candidate in enumerate(candidates):
         goal = f"""Research this news story in depth:
 Title: {candidate.get('title', '')}
 URL: {candidate.get('url', '')}
@@ -229,31 +239,26 @@ Snippet: {candidate.get('snippet', '')}
 Topic: {topic}
 Today: {date.today().isoformat()}
 
-Follow the standard news coverage checklist:
-- What happened (core event, one sentence)
-- Who is involved
-- When (date confirmed from at least one source)
-- Numbers or specifics (amounts, dates, figures)
-- Primary source located (official statement, filing, release), or marked unavailable
-- Reaction or context (one supporting or contrasting source)
-- Why it matters
-
+Follow the standard news coverage checklist: confirm what happened, who and when;
+include key numbers, seek a primary source and supporting context, explain why it matters.
 Return a comprehensive answer with all sources cited."""
-
-        sends.append(
-            Send(
-                "research_agent",
-                {
-                    "goal": goal,
-                    "candidate": candidate,
-                    "agent_index": i,
-                    "run_id": run_id,
-                    "topic": topic,
-                },
-            )
-        )
-
+        sends.append(Send("research_agent", {
+            "goal": goal,
+            "candidate": candidate,
+            "agent_index": index,
+            "run_id": run_id,
+            "topic": topic,
+        }))
     return sends
+
+
+def fan_out_dispatch(state: TopicState):
+    sends = _build_research_sends(state)
+    return sends if sends else "collect"
+
+
+def should_research(state: TopicState) -> str:
+    return "research_agent" if state.get("candidates") else "collect"
 
 
 async def research_agent_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -267,9 +272,13 @@ async def research_agent_node(state: dict[str, Any]) -> dict[str, Any]:
 
     logger.info("Starting research agent", agent_id=agent_id, title=candidate.get("title", "")[:50])
 
+    config = state.get("config")
+    if config is None:
+        config = get_config()["configurable"]["app_config"]
+
     result: ResearchResult = await run_research(
         goal,
-        config=get_config()["configurable"]["app_config"],
+        config=config,
         run_id=run_id,
         agent_id=agent_id,
     )
@@ -370,7 +379,13 @@ Return ONLY a JSON array of indices (0-based) of the top {items_per_topic} stori
     except Exception:
         indices = list(range(min(items_per_topic, len(research_results))))
 
-    selected = [research_results[i] for i in indices if 0 <= i < len(research_results)]
+    selected = [
+        research_results[i]
+        for i in indices
+        if isinstance(i, int) and 0 <= i < len(research_results)
+    ]
+    if not selected:
+        selected = research_results[:items_per_topic]
     logger.info("Ranked and selected", count=len(selected))
     return {"selected": selected}
 
@@ -380,7 +395,8 @@ async def dedupe_story_node(state: TopicState) -> dict[str, Any]:
     topic = state["topic"]
     run_id = state["run_id"]
 
-    memory = MemoryStore()
+    config: Config = get_config()["configurable"]["app_config"]
+    memory = MemoryStore(config)
     memory._init_db()
 
     recent = memory.get_recent_posts(topic, days=30)
@@ -389,7 +405,11 @@ async def dedupe_story_node(state: TopicState) -> dict[str, Any]:
     for r in selected:
         candidate = r.get("candidate", {})
         answer = r.get("answer", "")
-        key_facts = [f for f in r.get("notes", {}).values() if str(f).startswith("facts_")]
+        key_facts = [
+            str(value)
+            for key, value in r.get("notes", {}).items()
+            if key.startswith("facts_")
+        ]
 
         is_dup, reason = memory.check_duplicate(
             url=candidate.get("url", ""),
@@ -414,51 +434,42 @@ async def backfill_node(state: TopicState) -> dict[str, Any]:
     items_per_topic = state.get("items_per_topic", 3)
     max_backfill = state.get("max_backfill_rounds", 1)
     max_parallel = state.get("max_parallel_agents", 3)
-    run_id = state["run_id"]
-    topic = state["topic"]
 
     lead_notes = state.get("lead_notes", {})
     backfill_rounds = lead_notes.get("backfill_rounds", 0)
 
     if len(selected) >= items_per_topic or backfill_rounds >= max_backfill:
-        return {}
+        return {"lead_notes": lead_notes}
 
-    remaining = [r for r in research_results if r not in selected]
-    if not remaining:
-        return {}
+    researched_urls = {
+        r.get("candidate", {}).get("url", "")
+        for r in research_results
+    }
+    attempted_urls = {
+        c.get("url", "") for c in state.get("lead_notes", {}).get("attempted_candidates", [])
+    }
+    new_candidates = [
+        c for c in state.get("candidates", [])
+        if c.get("url", "") not in researched_urls | attempted_urls
+    ][:max_parallel]
 
-    need = items_per_topic - len(selected)
-    to_backfill = remaining[:min(need, max_parallel)]
+    if not new_candidates:
+        return {"lead_notes": {**lead_notes, "backfill_rounds": backfill_rounds + 1}}
 
-    logger.info("Backfilling", need=need, available=len(remaining), backfilling=len(to_backfill))
+    logger.info("Backfilling", need=items_per_topic - len(selected), backfilling=len(new_candidates))
 
-    sends = []
-    for i, r in enumerate(to_backfill):
-        candidate = r.get("candidate", {})
-        goal = f"""Research this news story in depth (backfill):
-Title: {candidate.get('title', '')}
-URL: {candidate.get('url', '')}
-Snippet: {candidate.get('snippet', '')}
-Topic: {topic}
-Today: {date.today().isoformat()}
-
-Follow the standard news coverage checklist.
-Return a comprehensive answer with all sources cited."""
-
-        sends.append(
-            Send(
-                "research_agent",
-                {
-                    "goal": goal,
-                    "candidate": candidate,
-                    "agent_index": len(selected) + i,
-                    "run_id": run_id,
-                    "topic": topic,
-                },
-            )
-        )
-
-    return {"lead_notes": {**lead_notes, "backfill_rounds": backfill_rounds + 1}, "__sends": sends}
+    return {
+        "lead_notes": {
+            **lead_notes,
+            "backfill_rounds": backfill_rounds + 1,
+            "attempted_candidates": [
+                *lead_notes.get("attempted_candidates", []),
+                *new_candidates,
+            ],
+        },
+        "candidates": new_candidates,
+        "research": [],
+    }
 
 
 async def compose_node(state: TopicState) -> dict[str, Any]:
@@ -517,12 +528,13 @@ async def post_telegram_node(state: TopicState) -> dict[str, Any]:
     run_id = state["run_id"]
     topic = state["topic"]
     selected = state.get("selected", [])
+    config: Config | None = state.get("config")
 
     if not message or not selected:
         logger.info("Nothing to post")
         return {"sent": False}
 
-    memory = MemoryStore()
+    memory = MemoryStore(config)
     memory._init_db()
 
     pending_id = memory.create_pending_post(
@@ -532,8 +544,28 @@ async def post_telegram_node(state: TopicState) -> dict[str, Any]:
     )
 
     try:
-        result = await send_telegram_message(message)
-        telegram_msg_id = result.get("message_id", 0) if isinstance(result, dict) else 0
+        result = await send_telegram_message(message, config=config)
+        if isinstance(result, dict):
+            sent = bool(result.get("success", result.get("ok", False)))
+            telegram_msg_id = result.get("message_id") or result.get("result", {}).get("message_id")
+            send_error = result.get("error") or result.get("description")
+        else:
+            sent = bool(getattr(result, "success", False))
+            telegram_msg_id = getattr(result, "message_id", None)
+            send_error = getattr(result, "error", None)
+
+        if not sent:
+            error = send_error or "Telegram did not confirm message delivery"
+            logger.error("Telegram send failed", error=error)
+            memory.mark_pending_failed(pending_id, error)
+            memory.finish_run(run_id, "failed", error=error)
+            return {"sent": False, "errors": [f"Telegram send failed: {error}"]}
+
+        if telegram_msg_id is None:
+            error = "Telegram returned success without a message ID"
+            memory.mark_pending_failed(pending_id, error)
+            memory.finish_run(run_id, "failed", error=error)
+            return {"sent": False, "errors": [error]}
 
         memory.mark_pending_sent(pending_id, telegram_msg_id)
 
@@ -553,7 +585,12 @@ async def post_telegram_node(state: TopicState) -> dict[str, Any]:
                 run_id=run_id,
             )
 
-        memory.finish_run(run_id, "success", steps=len(selected), fetches=sum(r.get("fetches_used", 0) for r in selected))
+        memory.finish_run(
+            run_id,
+            "success",
+            steps=len(selected),
+            fetches=sum(r.get("fetches_used", 0) for r in selected),
+        )
         logger.info("Posted to Telegram", run_id=run_id, message_id=telegram_msg_id)
         return {"sent": True}
 

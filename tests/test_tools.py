@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,43 +22,33 @@ from newsagent.tools.registry import (
 from newsagent.config import AgentConfig, CrawlConfig, Config
 
 
-class MockHTTPResponse:
-    def __init__(self, json_data, status_code=200):
-        self._json_data = json_data
-        self.status_code = status_code
-
-    def json(self):
-        return self._json_data
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise Exception(f"HTTP {self.status_code}")
-
-
 @pytest.fixture
-def mock_httpx_client():
-    with patch("httpx.AsyncClient") as mock:
-        client_instance = AsyncMock()
-        mock.return_value = client_instance
-        yield client_instance
-
-
-@pytest.fixture
-def tinyfish_client(mock_httpx_client):
+def tinyfish_client():
     client = TinyFishClient(api_key="test-key")
-    client._client = mock_httpx_client
     return client
 
 
+def _mock_search(client, query, results, total_results):
+    client._sdk.search.query = MagicMock(return_value=SimpleNamespace(
+        results=results,
+        total_results=total_results,
+        query=query,
+    ))
+
+
+def _mock_fetch(client, results, errors):
+    client._sdk.fetch.get_contents = MagicMock(return_value=SimpleNamespace(
+        results=results,
+        errors=errors,
+    ))
+
+
 @pytest.mark.asyncio
-async def test_search_success(tinyfish_client, mock_httpx_client):
-    mock_httpx_client.get.return_value = MockHTTPResponse({
-        "results": [
-            {"title": "Test Result 1", "url": "https://example.com/1", "snippet": "Snippet 1"},
-            {"title": "Test Result 2", "url": "https://example.com/2", "snippet": "Snippet 2"},
-        ],
-        "total_results": 2,
-    })
+async def test_search_success(tinyfish_client):
+    _mock_search(tinyfish_client, "test query", [
+        SimpleNamespace(title="Test Result 1", url="https://example.com/1", snippet="Snippet 1"),
+        SimpleNamespace(title="Test Result 2", url="https://example.com/2", snippet="Snippet 2"),
+    ], 2)
 
     result = await tinyfish_client.search("test query", num_results=5)
 
@@ -70,34 +61,29 @@ async def test_search_success(tinyfish_client, mock_httpx_client):
 
 
 @pytest.mark.asyncio
-async def test_search_caching(tinyfish_client, mock_httpx_client):
-    mock_httpx_client.get.return_value = MockHTTPResponse({
-        "results": [{"title": "Cached", "url": "https://cached.com", "snippet": "Cached"}],
-        "total_results": 1,
-    })
+async def test_search_caching(tinyfish_client):
+    _mock_search(tinyfish_client, "same query", [
+        SimpleNamespace(title="Cached", url="https://cached.com", snippet="Cached"),
+    ], 1)
 
     result1 = await tinyfish_client.search("same query")
     result2 = await tinyfish_client.search("same query")
 
     assert result1.results[0].title == "Cached"
     assert result2.results[0].title == "Cached"
-    assert mock_httpx_client.get.call_count == 1
+    assert tinyfish_client._sdk.search.query.call_count == 1
 
 
 @pytest.mark.asyncio
-async def test_fetch_success(tinyfish_client, mock_httpx_client):
-    mock_httpx_client.post.return_value = MockHTTPResponse({
-        "results": [
-            {
-                "url": "https://example.com/page",
-                "title": "Page Title",
-                "text": "Page content here with [link](https://example.com/link)",
-                "content_type": "text/html",
-                "status_code": 200,
-            }
-        ],
-        "errors": [],
-    })
+async def test_fetch_success(tinyfish_client):
+    _mock_fetch(tinyfish_client, [
+        SimpleNamespace(
+            url="https://example.com/page",
+            title="Page Title",
+            text="Page content here with [link](https://example.com/link)",
+            format="markdown",
+        )
+    ], [])
 
     result = await tinyfish_client.fetch(["https://example.com/page"])
 
@@ -112,13 +98,10 @@ async def test_fetch_success(tinyfish_client, mock_httpx_client):
 
 
 @pytest.mark.asyncio
-async def test_fetch_with_error(tinyfish_client, mock_httpx_client):
-    mock_httpx_client.post.return_value = MockHTTPResponse({
-        "results": [
-            {"url": "https://example.com/bad", "error": "404 Not Found"}
-        ],
-        "errors": [{"url": "https://example.com/bad", "error": "404 Not Found"}],
-    })
+async def test_fetch_with_error(tinyfish_client):
+    _mock_fetch(tinyfish_client, [], [
+        SimpleNamespace(url="https://example.com/bad", error="404 Not Found"),
+    ])
 
     result = await tinyfish_client.fetch(["https://example.com/bad"])
 
@@ -202,7 +185,7 @@ def test_budget_stalled():
     assert not budget.stalled()
 
 
-def test_tool_registry_search_budget(mock_httpx_client):
+def test_tool_registry_search_budget():
     config = AgentConfig(max_search_calls=1)
     crawl_config = CrawlConfig()
     registry = ToolRegistry(config, crawl_config)
@@ -229,7 +212,7 @@ def test_tool_registry_search_budget(mock_httpx_client):
     assert "budget exhausted" in data2["error"]
 
 
-def test_tool_registry_duplicate_query(mock_httpx_client):
+def test_tool_registry_duplicate_query():
     config = AgentConfig()
     crawl_config = CrawlConfig()
     registry = ToolRegistry(config, crawl_config)

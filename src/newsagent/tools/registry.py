@@ -75,6 +75,9 @@ class Budget:
             f"Time: {time.time() - self.start_time:.0f}/{self.wall_clock_seconds}s"
         )
 
+    def elapsed_seconds(self) -> float:
+        return max(0.0, time.time() - self.start_time)
+
     def cost_summary(self) -> dict[str, Any]:
         """Return cost summary for logging."""
         return {
